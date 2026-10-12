@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
+
+	"github.com/haytamxp/orchid-webshield/webapp/internal/config"
 )
 
 func main() {
-	port := os.Getenv("WEBAPP_PORT")
-	if port == "" {
-		port = "8081"
-	}
+	cfg := config.Load()
 
 	mux := http.NewServeMux()
 
@@ -20,6 +18,6 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	log.Printf("webapp listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	log.Printf("webapp listening on :%s", cfg.Port)
+	log.Fatal(http.ListenAndServe(":"+cfg.Port, mux))
 }
