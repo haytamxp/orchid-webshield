@@ -6,10 +6,21 @@ import (
 	"net/http"
 
 	"github.com/haytamxp/orchid-webshield/webapp/internal/config"
+	"github.com/haytamxp/orchid-webshield/webapp/internal/db"
 )
 
 func main() {
 	cfg := config.Load()
+
+	conn, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		log.Fatalf("database: %v", err)
+	}
+	defer conn.Close()
+
+	var tables int
+	conn.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables)
+	log.Printf("database ready: %d tables", tables)
 
 	mux := http.NewServeMux()
 
