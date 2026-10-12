@@ -1,0 +1,16 @@
+# Secrets and local configuration
+.env
+
+# Local database
+database/*.db
+
+# Security event logs
+logs/*
+
+# User uploads (keep the folder, ignore its content)
+uploads/*
+!uploads/.gitkeep
+
+# Compiled binaries
+*.exe
+bin/
