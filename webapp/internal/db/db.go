@@ -13,7 +13,7 @@ import (
 
 // Open ouvre la base SQLite et crée les tables si elles n'existent pas.
 func Open(path string) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
 
