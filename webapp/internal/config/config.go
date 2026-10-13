@@ -18,7 +18,7 @@ type Config struct {
 
 // Load lit le fichier .env (s'il existe), puis les variables d'environnement.
 func Load() Config {
-	loadEnvFile(".env")
+	loadEnvFile()
 
 	return Config{
 		Port:          getEnv("WEBAPP_PORT", "8081"),
@@ -40,8 +40,10 @@ func getEnv(key, fallback string) string {
 
 // loadEnvFile lit un fichier de lignes CLE=valeur et les place dans l'environnement.
 // Une variable déjà définie n'est pas écrasée.
-func loadEnvFile(path string) {
-	file, err := os.Open(path)
+const envFile = ".env"
+
+func loadEnvFile() {
+	file, err := os.Open(envFile)
 	if err != nil {
 		return // pas de fichier .env : on utilise les valeurs par défaut
 	}
