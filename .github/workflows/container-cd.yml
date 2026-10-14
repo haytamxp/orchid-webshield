@@ -1,4 +1,4 @@
-﻿name: WebShield Container CD
+name: WebShield Container CD
 
 on:
   workflow_run:
@@ -77,6 +77,7 @@ jobs:
 
           echo "PASS: both modules passed vet, tests and builds."
       - name: Prepare registry names and commit tag
+        id: image_names
         shell: bash
         run: |
           set -euo pipefail
@@ -85,7 +86,9 @@ jobs:
           IMAGE_TAG="sha-${SOURCE_SHA:0:12}"
 
           echo "IMAGE_PREFIX=$IMAGE_PREFIX" >> "$GITHUB_ENV"
+          echo "image_prefix=$IMAGE_PREFIX" >> "$GITHUB_OUTPUT"
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
           echo "Backend image: ${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
           echo "Webapp image:  ${IMAGE_PREFIX}-webapp:${IMAGE_TAG}"
@@ -198,6 +201,27 @@ jobs:
           fi
 
           echo "PASS: both images passed health and non-root configuration checks."
+
+      - name: Scan backend image for HIGH and CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "${{ steps.image_names.outputs.image_prefix }}-backend:${{ steps.image_names.outputs.image_tag }}"
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Scan webapp image for HIGH and CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "${{ steps.image_names.outputs.image_prefix }}-webapp:${{ steps.image_names.outputs.image_tag }}"
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+          skip-setup-trivy: true
 
       - name: Authenticate to GitHub Container Registry
         env:
