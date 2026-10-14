@@ -52,3 +52,40 @@ Run a previously validated commit-specific `sha-...` image rather than `latest`.
 Automated deployment requires a selected host or platform, a protected GitHub
 Environment, deployment credentials, health checks and rollback logic. Configure
 those for the chosen target before automatically changing a live environment.
+
+## Supply-chain artifacts and attestations
+
+The container release workflow generates an SPDX JSON SBOM for each locally built image after the smoke tests and Trivy scans pass.
+
+- Backend SBOM: `sbom-backend.spdx.json`.
+- Webapp SBOM: `sbom-webapp.spdx.json`.
+- The workflow checks that both files are non-empty and have the expected SPDX JSON structure.
+- Both files are uploaded as the `webshield-sboms-<source SHA>` workflow artifact with 90-day retention.
+- The workflow captures each image digest from the commit-specific Docker push.
+- GitHub artifact attestations are created for build provenance and for each SBOM, associated with the matching image digest and pushed to GHCR.
+
+The publishing job uses `id-token: write` for the short-lived signing identity and `attestations: write` to store attestation evidence. It retains `packages: write` for registry publication. Storage-record creation is disabled because this repository is under a personal account rather than an organization.
+
+### Verify container build provenance
+
+Run the following commands in PowerShell after installing GitHub CLI and authenticating with `gh auth login`. Replace the example commit tag with the one used by the release you are inspecting.
+
+```powershell
+docker login ghcr.io
+$Tag = "sha-REPLACE_WITH_12_CHAR_COMMIT"
+gh attestation verify "oci://ghcr.io/haytamxp/orchid-webshield-backend:$Tag" -R haytamxp/orchid-webshield
+gh attestation verify "oci://ghcr.io/haytamxp/orchid-webshield-webapp:$Tag" -R haytamxp/orchid-webshield
+```
+
+### Verify the SPDX SBOM attestation
+
+```powershell
+gh attestation verify "oci://ghcr.io/haytamxp/orchid-webshield-backend:$Tag" -R haytamxp/orchid-webshield --predicate-type https://spdx.dev/Document/v2.3
+gh attestation verify "oci://ghcr.io/haytamxp/orchid-webshield-webapp:$Tag" -R haytamxp/orchid-webshield --predicate-type https://spdx.dev/Document/v2.3
+```
+
+The SBOM workflow artifact provides downloadable inventory files. Attestations provide verifiable statements about the image digest, source/build process, and SBOM. Neither replaces vulnerability remediation or a full security review.
+
+References:
+- GitHub artifact attestations: https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations
+- Anchore SBOM Action: https://github.com/anchore/sbom-action
