@@ -1,0 +1,237 @@
+﻿name: WebShield Container CD
+
+on:
+  workflow_run:
+    workflows:
+      - WebShield P4 CI
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p4-container-cd-main
+  cancel-in-progress: false
+
+jobs:
+  publish-images:
+    name: Build, smoke-test and publish containers
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      GOTOOLCHAIN: local
+
+    steps:
+      - name: Checkout the exact commit that passed CI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.26.9"
+          cache: false
+
+      - name: Revalidate both Go modules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          actual="$(go env GOVERSION)"
+          if [[ "$actual" != "go1.26.9" ]]; then
+            echo "::error::Expected Go 1.26.9, received $actual"
+            exit 1
+          fi
+
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ "$checked_out_sha" != "$SOURCE_SHA" ]]; then
+            echo "::error::Checked-out commit does not match the CI source commit."
+            echo "Expected: $SOURCE_SHA"
+            echo "Received: $checked_out_sha"
+            exit 1
+          fi
+
+          for module in backend webapp; do
+            echo "::group::Validate $module"
+            pushd "$module" >/dev/null
+
+            go vet -mod=readonly ./...
+            go test -count=1 -mod=readonly ./...
+            go build -mod=readonly ./...
+
+            popd >/dev/null
+            echo "::endgroup::"
+          done
+
+          echo "PASS: both modules passed vet, tests and builds."
+      - name: Prepare registry names and commit tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE_PREFIX="ghcr.io/${GITHUB_REPOSITORY,,}"
+          IMAGE_TAG="sha-${SOURCE_SHA:0:12}"
+
+          echo "IMAGE_PREFIX=$IMAGE_PREFIX" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          echo "Backend image: ${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
+          echo "Webapp image:  ${IMAGE_PREFIX}-webapp:${IMAGE_TAG}"
+
+      - name: Build backend image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --pull \
+            --platform linux/amd64 \
+            --file backend/Dockerfile \
+            --tag "${IMAGE_PREFIX}-backend:${IMAGE_TAG}" \
+            --tag "${IMAGE_PREFIX}-backend:latest" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+            .
+
+      - name: Build webapp image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --pull \
+            --platform linux/amd64 \
+            --file webapp/Dockerfile \
+            --tag "${IMAGE_PREFIX}-webapp:${IMAGE_TAG}" \
+            --tag "${IMAGE_PREFIX}-webapp:latest" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+            .
+
+      - name: Smoke-test images before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            docker rm -f webshield-backend-smoke webshield-webapp-smoke >/dev/null 2>&1 || true
+            docker volume rm webshield-webapp-smoke-data >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          backend_image="${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
+          webapp_image="${IMAGE_PREFIX}-webapp:${IMAGE_TAG}"
+
+          docker volume create webshield-webapp-smoke-data >/dev/null
+
+          docker run -d \
+            --name webshield-backend-smoke \
+            --publish 127.0.0.1:18080:8080 \
+            --env HTTP_ADDR=0.0.0.0:8080 \
+            "$backend_image"
+
+          docker run -d \
+            --name webshield-webapp-smoke \
+            --publish 127.0.0.1:18081:8081 \
+            --mount type=volume,source=webshield-webapp-smoke-data,target=/data \
+            --env WEBAPP_PORT=8081 \
+            --env WEBAPP_DATABASE_PATH=/data/webshield.db \
+            --env WEBAPP_UPLOAD_DIR=/data/uploads \
+            --env WEBAPP_LOG_FILE=/data/logs/security_events.jsonl \
+            "$webapp_image"
+
+          wait_for_health() {
+            local container_name="$1"
+            local url="$2"
+            local response_file
+
+            response_file="$(mktemp)"
+
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent "$url" --output "$response_file"; then
+                if grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' "$response_file"; then
+                  echo "PASS: $container_name at $url"
+                  cat "$response_file"
+                  rm -f "$response_file"
+                  return 0
+                fi
+              fi
+              sleep 2
+            done
+
+            echo "::error::Health check failed for $container_name at $url"
+            docker logs "$container_name" || true
+            cat "$response_file" || true
+            rm -f "$response_file"
+            return 1
+          }
+
+          wait_for_health \
+            webshield-backend-smoke \
+            http://127.0.0.1:18080/api/v1/health
+
+          wait_for_health \
+            webshield-webapp-smoke \
+            http://127.0.0.1:18081/health
+
+          backend_user="$(docker image inspect --format '{{.Config.User}}' "$backend_image")"
+          webapp_user="$(docker image inspect --format '{{.Config.User}}' "$webapp_image")"
+
+          echo "Backend image runtime user: $backend_user"
+          echo "Webapp image runtime user:  $webapp_user"
+
+          if [[ "$backend_user" != "65532:65532" || "$webapp_user" != "65532:65532" ]]; then
+            echo "::error::A container image does not specify the expected non-root UID/GID."
+            exit 1
+          fi
+
+          echo "PASS: both images passed health and non-root configuration checks."
+
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish commit-specific images
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker push "${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
+          docker push "${IMAGE_PREFIX}-webapp:${IMAGE_TAG}"
+
+      - name: Publish latest aliases
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker push "${IMAGE_PREFIX}-backend:latest"
+          docker push "${IMAGE_PREFIX}-webapp:latest"
+
+      - name: Write release summary
+        shell: bash
+        run: |
+          {
+            echo "## WebShield container release"
+            echo ""
+            echo "- Source commit: \`${SOURCE_SHA}\`"
+            echo "- Backend: \`${IMAGE_PREFIX}-backend:${IMAGE_TAG}\`"
+            echo "- Webapp: \`${IMAGE_PREFIX}-webapp:${IMAGE_TAG}\`"
+            echo "- Aliases: \`latest\` tags published after health tests passed."
+          } >> "$GITHUB_STEP_SUMMARY"
