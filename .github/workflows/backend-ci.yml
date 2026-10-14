@@ -114,7 +114,8 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
 
       - name: Scan backend
-        run: "$HOME/go/bin/gosec" ./...
+        run: |
+          "$HOME/go/bin/gosec" ./...
 
   p4-dependency-scan:
     name: P4 backend dependency scan
@@ -144,7 +145,8 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Scan backend dependencies
-        run: "$HOME/go/bin/govulncheck" ./...
+        run: |
+          "$HOME/go/bin/govulncheck" ./...
 
   repository-secret-scan:
     name: Shared repository secret scan
