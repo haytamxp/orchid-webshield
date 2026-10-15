@@ -1,3 +1,4 @@
+
 package handlers
 
 import (
@@ -10,6 +11,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/haytamxp/orchid-webshield/webapp/internal/models"
+	"github.com/haytamxp/orchid-webshield/webapp/internal/securityevents"
 	"github.com/haytamxp/orchid-webshield/webapp/internal/validation"
 )
 
@@ -20,6 +22,7 @@ const bcryptCost = 12
 type Handler struct {
 	DB           *sql.DB
 	CookieSecure bool
+	Events       *securityevents.Logger
 }
 
 type registerRequest struct {
@@ -41,11 +44,13 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
+
 	email, err := validation.Email(req.Email)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
+
 	if err := validation.Password(req.Password); err != nil {
 		writeError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return

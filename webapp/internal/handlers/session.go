@@ -1,3 +1,4 @@
+
 package handlers
 
 import (
@@ -14,13 +15,32 @@ import (
 // sessionCookieName est le nom du cookie de session.
 const sessionCookieName = "session"
 
-// dummyHash sert à faire un calcul bcrypt même quand le compte n'existe pas,
-// pour que le temps de réponse ne révèle pas quels comptes existent.
+// dummyHash évite de révéler l'existence d'un compte par le temps de réponse.
 var dummyHash, _ = bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing"), bcryptCost)
 
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+// logSecurityEvent écrit un événement sans interrompre la requête en cas d'erreur.
+func (h *Handler) logSecurityEvent(
+	r *http.Request,
+	eventType string,
+	severity string,
+	username *string,
+	status int,
+	details map[string]any,
+) {
+	if h.Events == nil {
+		return
+	}
+
+	if err := h.Events.LogRequest(
+		r, eventType, severity, username, status, details,
+	); err != nil {
+		log.Printf("security event logging failed: %v", err)
+	}
 }
 
 // Login vérifie les identifiants, crée une session et pose le cookie.
@@ -47,6 +67,15 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	passwordErr := bcrypt.CompareHashAndPassword(hash, []byte(req.Password))
 
 	if user == nil || passwordErr != nil {
+		h.logSecurityEvent(
+			r,
+			"login_failure",
+			"MEDIUM",
+			nil,
+			http.StatusUnauthorized,
+			map[string]any{"reason": "invalid_credentials"},
+		)
+
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 		return
 	}
@@ -67,6 +96,16 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	eventUsername := user.Username
+	h.logSecurityEvent(
+		r,
+		"login_success",
+		"LOW",
+		&eventUsername,
+		http.StatusOK,
+		nil,
+	)
 
 	writeData(w, http.StatusOK, map[string]any{
 		"id":       user.ID,
