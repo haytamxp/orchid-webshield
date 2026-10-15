@@ -26,6 +26,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
     env:
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -223,6 +225,48 @@ jobs:
           severity: 'HIGH,CRITICAL'
           skip-setup-trivy: true
 
+      - name: Generate backend image SBOM (SPDX JSON)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          image: "${{ steps.image_names.outputs.image_prefix }}-backend:${{ steps.image_names.outputs.image_tag }}"
+          format: spdx-json
+          output-file: sbom-backend.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate webapp image SBOM (SPDX JSON)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          image: "${{ steps.image_names.outputs.image_prefix }}-webapp:${{ steps.image_names.outputs.image_tag }}"
+          format: spdx-json
+          output-file: sbom-webapp.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Validate generated SBOM documents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for sbom in sbom-backend.spdx.json sbom-webapp.spdx.json; do
+            if [[ ! -s "$sbom" ]]; then
+              echo "::error::SBOM missing or empty: $sbom"
+              exit 1
+            fi
+
+            jq -e '(.spdxVersion | type == "string") and (.packages | type == "array")' "$sbom" >/dev/null
+            echo "PASS: SPDX JSON structure in $sbom"
+          done
+
+      - name: Upload image SBOMs as workflow artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: "webshield-sboms-${{ env.SOURCE_SHA }}"
+          path: |
+            sbom-backend.spdx.json
+            sbom-webapp.spdx.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Authenticate to GitHub Container Registry
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -233,12 +277,77 @@ jobs:
             docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Publish commit-specific images
+        id: publish_images
         shell: bash
         run: |
           set -euo pipefail
 
-          docker push "${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
-          docker push "${IMAGE_PREFIX}-webapp:${IMAGE_TAG}"
+          backend_image="${IMAGE_PREFIX}-backend:${IMAGE_TAG}"
+          webapp_image="${IMAGE_PREFIX}-webapp:${IMAGE_TAG}"
+
+          if ! backend_push_output="$(docker push "$backend_image" 2>&1)"; then
+            printf "%s\n" "$backend_push_output"
+            exit 1
+          fi
+          printf "%s\n" "$backend_push_output"
+          backend_digest="$(printf "%s\n" "$backend_push_output" | grep -Eo 'sha256:[0-9a-f]{64}' | tail -n 1 || true)"
+
+          if [[ ! "$backend_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not extract backend digest."
+            exit 1
+          fi
+
+          if ! webapp_push_output="$(docker push "$webapp_image" 2>&1)"; then
+            printf "%s\n" "$webapp_push_output"
+            exit 1
+          fi
+          printf "%s\n" "$webapp_push_output"
+          webapp_digest="$(printf "%s\n" "$webapp_push_output" | grep -Eo 'sha256:[0-9a-f]{64}' | tail -n 1 || true)"
+
+          if [[ ! "$webapp_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not extract webapp digest."
+            exit 1
+          fi
+
+          echo "backend_digest=$backend_digest" >> "$GITHUB_OUTPUT"
+          echo "webapp_digest=$webapp_digest" >> "$GITHUB_OUTPUT"
+
+          echo "Backend digest: $backend_digest"
+          echo "Webapp digest:  $webapp_digest"
+
+      - name: Attest backend image build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: "${{ steps.image_names.outputs.image_prefix }}-backend"
+          subject-digest: "${{ steps.publish_images.outputs.backend_digest }}"
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest backend image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: "${{ steps.image_names.outputs.image_prefix }}-backend"
+          subject-digest: "${{ steps.publish_images.outputs.backend_digest }}"
+          sbom-path: sbom-backend.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest webapp image build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: "${{ steps.image_names.outputs.image_prefix }}-webapp"
+          subject-digest: "${{ steps.publish_images.outputs.webapp_digest }}"
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest webapp image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: "${{ steps.image_names.outputs.image_prefix }}-webapp"
+          subject-digest: "${{ steps.publish_images.outputs.webapp_digest }}"
+          sbom-path: sbom-webapp.spdx.json
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Publish latest aliases
         shell: bash
@@ -257,5 +366,9 @@ jobs:
             echo "- Source commit: \`${SOURCE_SHA}\`"
             echo "- Backend: \`${IMAGE_PREFIX}-backend:${IMAGE_TAG}\`"
             echo "- Webapp: \`${IMAGE_PREFIX}-webapp:${IMAGE_TAG}\`"
+            echo "- Backend digest: \`${{ steps.publish_images.outputs.backend_digest }}\`"
+            echo "- Webapp digest: \`${{ steps.publish_images.outputs.webapp_digest }}\`"
+            echo "- SBOM artifact: `webshield-sboms-${SOURCE_SHA}` (90-day retention)."
+            echo "- Build provenance and SBOM attestations generated for both images."
             echo "- Aliases: \`latest\` tags published after health tests passed."
           } >> "$GITHUB_STEP_SUMMARY"
